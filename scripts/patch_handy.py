@@ -3,10 +3,6 @@
 Patch Handy source code to add phrase substitution feature.
 
 Runs inside the GitHub Actions workflow before `bun run tauri build`.
-Modifies:
-  - src-tauri/src/settings.rs   — adds PhraseSubstitution struct, new field, defaults
-  - src-tauri/src/actions.rs    — adds apply_phrase_substitutions function and calls it
-  - src-tauri/tauri.conf.json   — renames the app so it doesn't collide with original Handy
 """
 
 import json
@@ -47,13 +43,11 @@ def patch_settings_rs():
         print("settings.rs already patched - skipping")
         return
 
-    # 1. Insert PhraseSubstitution struct after LLMPrompt struct closing brace.
     m = re.search(r"(pub struct LLMPrompt \{[^}]*\})", src, re.DOTALL)
     if not m:
         raise RuntimeError("Couldn't locate LLMPrompt struct in settings.rs")
     src = src[:m.end()] + "\n" + PHRASE_STRUCT + src[m.end():]
 
-    # 2. Add new field in AppSettings struct right after custom_words.
     m = re.search(r"^([ \t]*)pub custom_words:\s*Vec<String>,\s*$", src, re.MULTILINE)
     if not m:
         raise RuntimeError("Couldn't find custom_words field in AppSettings")
@@ -64,7 +58,6 @@ def patch_settings_rs():
     )
     src = src[:m.end()] + "\n" + new_field_block + src[m.end():]
 
-    # 3. Add the default fn somewhere near other default_* fns.
     m = re.search(r"^fn ensure_post_process_defaults\(", src, re.MULTILINE)
     if not m:
         m = re.search(r"^fn default_typing_tool\(\)", src, re.MULTILINE)
@@ -72,7 +65,6 @@ def patch_settings_rs():
         raise RuntimeError("Couldn't find anchor for default_phrase_substitutions fn")
     src = src[:m.start()] + DEFAULT_PHRASE_SUBS_FN + "\n" + src[m.start():]
 
-    # 4. Add field to get_default_settings() return block right after custom_words init.
     m = re.search(r"^([ \t]*)custom_words:\s*Vec::new\(\),\s*$", src, re.MULTILINE)
     if not m:
         raise RuntimeError("Couldn't find custom_words init in get_default_settings()")
@@ -85,9 +77,6 @@ def patch_settings_rs():
 
 
 APPLY_FN = r'''
-/// Apply user-defined phrase substitutions to the transcription text.
-/// Runs after raw transcription and after Chinese variant conversion,
-/// but BEFORE LLM post-processing.
 fn apply_phrase_substitutions(text: &str, substitutions: &[crate::settings::PhraseSubstitution]) -> String {
     if substitutions.is_empty() {
         return text.to_string();
@@ -150,19 +139,17 @@ def patch_actions_rs():
         print("actions.rs already patched - skipping")
         return
 
-    # 1. Insert function before process_transcription_output.
     m = re.search(r"^pub\(crate\) async fn process_transcription_output", src, re.MULTILINE)
     if not m:
         raise RuntimeError("Couldn't find process_transcription_output in actions.rs")
     src = src[:m.start()] + APPLY_FN + "\n" + src[m.start():]
 
-    # 2. Inject substitution call before `if post_process {`.
     m = re.search(r"^([ \t]*)if post_process \{", src, re.MULTILINE)
     if not m:
         raise RuntimeError("Couldn't find post_process branch in process_transcription_output")
     indent = m.group(1)
     inject_block = (
-        f'{indent}// User-defined phrase substitutions (e.g., "три восклицательных знака" -> "!!!").\n'
+        f'{indent}// User-defined phrase substitutions.\n'
         f'{indent}if !settings.phrase_substitutions.is_empty() {{\n'
         f'{indent}    let before = final_text.clone();\n'
         f'{indent}    final_text = apply_phrase_substitutions(&final_text, &settings.phrase_substitutions);\n'
@@ -179,6 +166,8 @@ def patch_actions_rs():
 
 def patch_tauri_conf():
     conf = json.loads(TAURI_CONF.read_text(encoding="utf-8"))
+    changed = False
+
     name = conf.get("productName", "")
     if name.startswith("Handy") and name != "Handy Punct":
         conf["productName"] = "Handy Punct"
@@ -186,8 +175,28 @@ def patch_tauri_conf():
             conf["identifier"] = "com.pais.handy.punct"
         if "version" in conf and not conf["version"].endswith("-punct"):
             conf["version"] = conf["version"] + "-punct"
+        changed = True
+
+    bundle = conf.get("bundle", {})
+    if bundle.get("createUpdaterArtifacts"):
+        bundle["createUpdaterArtifacts"] = False
+        changed = True
+    win = bundle.get("windows", {})
+    if "signCommand" in win:
+        del win["signCommand"]
+        changed = True
+    if "certificateThumbprint" in win:
+        del win["certificateThumbprint"]
+        changed = True
+
+    plugins = conf.get("plugins", {})
+    if "updater" in plugins:
+        del plugins["updater"]
+        changed = True
+
+    if changed:
         TAURI_CONF.write_text(json.dumps(conf, indent=2, ensure_ascii=False), encoding="utf-8")
-        print("tauri.conf.json patched (renamed to Handy Punct)")
+        print("tauri.conf.json patched (Handy Punct, signing/updater stripped)")
     else:
         print("tauri.conf.json: nothing to do")
 
