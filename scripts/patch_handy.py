@@ -173,8 +173,12 @@ def patch_tauri_conf():
         conf["productName"] = "Handy Punct"
         if "identifier" in conf and conf["identifier"].startswith("com.pais.handy"):
             conf["identifier"] = "com.pais.handy.punct"
-        if "version" in conf and not conf["version"].endswith("-punct"):
-            conf["version"] = conf["version"] + "-punct"
+        # NOTE: do NOT touch version. MSI bundle requires numeric-only versions ≤65535
+        # per component; "-punct" pre-release identifier breaks MSI. The unique
+        # identifier (com.pais.handy.punct) is enough to install side-by-side.
+        # If a user previously got "0.8.3-punct" version from old build, strip it.
+        if "version" in conf and conf["version"].endswith("-punct"):
+            conf["version"] = conf["version"][:-len("-punct")]
         changed = True
 
     bundle = conf.get("bundle", {})
