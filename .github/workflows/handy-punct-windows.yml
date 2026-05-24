@@ -1,0 +1,116 @@
+name: "Handy Punct (Windows build)"
+
+# Triggers:
+#  - push to any branch  => auto-build
+#  - manual workflow_dispatch from the Actions tab
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/handy-punct-windows.yml"
+      - "scripts/patch_handy.py"
+      - "src-tauri/**"
+      - "src/**"
+      - "package.json"
+      - "bun.lock"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Enable long paths
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply Handy Punct patches
+        shell: pwsh
+        run: |
+          python scripts/patch_handy.py
+
+      - name: Show patched diff (for log visibility)
+        shell: bash
+        run: |
+          git diff --stat || true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: handy-punct-windows-x64
+
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Shorten build path (avoid Windows MAX_PATH issues)
+        shell: pwsh
+        run: |
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          $targetDir = "$drive\t"
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          echo "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build with Tauri
+        env:
+          # Disable advanced SIMD so binary runs on older CPUs (matches official builds)
+          GGML_NATIVE: "OFF"
+          GGML_AVX: "OFF"
+          GGML_AVX2: "OFF"
+          GGML_FMA: "OFF"
+          GGML_F16C: "OFF"
+        run: bun run tauri build
+
+      - name: Locate build outputs
+        id: locate
+        shell: pwsh
+        run: |
+          $base = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "src-tauri/target" }
+          Write-Host "Looking inside: $base"
+          Get-ChildItem -Recurse -Path "$base/release/bundle" | Select-Object FullName
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: HandyPunct-windows-x64-msi
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload NSIS installer (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: HandyPunct-windows-x64-exe
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/release/bundle/nsis/*.exe
+          if-no-files-found: ignore
+          retention-days: 30
